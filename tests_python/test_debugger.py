@@ -270,26 +270,6 @@ class WriterThreadCaseRemoteDebuggerMultiProc(AbstractRemoteWriterThread):
 
 
 #=======================================================================================================================
-# WriterCaseLamda
-#======================================================================================================================
-class WriterCaseLamda(debugger_unittest.AbstractWriterThread):
-
-    TEST_FILE = debugger_unittest._get_debugger_test_file('_debugger_case_lamda.py')
-
-    def run(self):
-        self.start_socket()
-        self.write_add_breakpoint(1, 'None')
-        self.write_make_initial_run()
-
-        for _ in range(3):  # We'll hit the same breakpoint 3 times.
-            hit = self.wait_for_breakpoint_hit()
-
-            self.write_run_thread(hit.thread_id)
-
-        self.finished_ok = True
-
-
-#=======================================================================================================================
 # WriterDebugZipFiles
 #======================================================================================================================
 class WriterDebugZipFiles(debugger_unittest.AbstractWriterThread):
@@ -2298,41 +2278,53 @@ def test_case_print(case_setup):
         writer_thread.finished_ok = True
 
 
+@pytest.mark.skipif(IS_JYTHON, reason='Not working on Jython (needs to be investigated).')
+def test_case_lamdda(case_setup):
+    with case_setup.test_file('_debugger_case_lamda.py') as writer_thread:
+        writer_thread.write_add_breakpoint(1, 'None')
+        writer_thread.write_make_initial_run()
+
+        for _ in range(3):  # We'll hit the same breakpoint 3 times.
+            hit = writer_thread.wait_for_breakpoint_hit()
+
+            writer_thread.write_run_thread(hit.thread_id)
+
+        writer_thread.finished_ok = True
+
+
+@pytest.mark.skipif(IS_JYTHON, reason='Not working properly on Jython (needs investigation).')
+def test_case_suspension_policy(case_setup):
+    case_setup.check_case(WriterCaseBreakpointSuspensionPolicy)
+
+
+def test_case_get_thread_stack(case_setup):
+    case_setup.check_case(WriterCaseGetThreadStack)
+
+
+def test_case_dump_threads_to_stderr(case_setup):
+    case_setup.check_case(WriterCaseDumpThreadsToStderr)
+
+
+def test_stop_on_start_regular(case_setup):
+    case_setup.check_case(WriterCaseStopOnStartRegular)
+
+
+def test_stop_on_start_m_switch(case_setup):
+    case_setup.check_case(WriterCaseStopOnStartMSwitch)
+
+
+def test_stop_on_start_entry_point(case_setup):
+    case_setup.check_case(WriterCaseStopOnStartEntryPoint)
+
+
 #=======================================================================================================================
 # Test
 #=======================================================================================================================
 class Test(unittest.TestCase, debugger_unittest.DebuggerRunner):
 
-    @pytest.mark.skipif(IS_JYTHON, reason='Not working on Jython (needs to be investigated).')
-    def test_case_lamdda(case_setup):
-        case_setup.check_case(WriterCaseLamda)
-
-    @pytest.fixture(autouse=True)
-    def setup_fixtures(case_setup, tmpdir):
-        case_setup.tmpdir = tmpdir
-
     @pytest.mark.skipif(IS_JYTHON, reason='Not working properly on Jython (needs investigation).')
     def test_debug_zip_files(case_setup):
         case_setup.check_case(WriterDebugZipFiles(case_setup.tmpdir))
-
-    @pytest.mark.skipif(IS_JYTHON, reason='Not working properly on Jython (needs investigation).')
-    def test_case_suspension_policy(case_setup):
-        case_setup.check_case(WriterCaseBreakpointSuspensionPolicy)
-
-    def test_case_get_thread_stack(case_setup):
-        case_setup.check_case(WriterCaseGetThreadStack)
-
-    def test_case_dump_threads_to_stderr(case_setup):
-        case_setup.check_case(WriterCaseDumpThreadsToStderr)
-
-    def test_stop_on_start_regular(case_setup):
-        case_setup.check_case(WriterCaseStopOnStartRegular)
-
-    def test_stop_on_start_m_switch(case_setup):
-        case_setup.check_case(WriterCaseStopOnStartMSwitch)
-
-    def test_stop_on_start_entry_point(case_setup):
-        case_setup.check_case(WriterCaseStopOnStartEntryPoint)
 
 
 @pytest.mark.skipif(not IS_CPYTHON, reason='CPython only test.')
