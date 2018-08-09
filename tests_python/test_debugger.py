@@ -63,6 +63,25 @@ from tests_python.debug_constants import TEST_CYTHON
 from tests_python.debug_constants import TEST_JYTHON
 
 
+def get_java_location():
+    from java.lang import System  # @UnresolvedImport
+    jre_dir = System.getProperty("java.home")
+    for f in [os.path.join(jre_dir, 'bin', 'java.exe'), os.path.join(jre_dir, 'bin', 'java')]:
+        if os.path.exists(f):
+            return f
+    raise RuntimeError('Unable to find java executable')
+
+
+def get_jython_jar():
+    from java.lang import ClassLoader  # @UnresolvedImport
+    cl = ClassLoader.getSystemClassLoader()
+    paths = map(lambda url: url.getFile(), cl.getURLs())
+    for p in paths:
+        if 'jython.jar' in p:
+            return p
+    raise RuntimeError('Unable to find jython.jar')
+
+
 #=======================================================================================================================
 # AbstractRemoteWriterThread
 #=======================================================================================================================
@@ -267,225 +286,6 @@ class WriterThreadCaseRemoteDebuggerMultiProc(AbstractRemoteWriterThread):
         debugger_unittest.AbstractWriterThread.do_kill(self)
         if hasattr(self, 'secondary_multi_proc_process_writer_thread'):
             self.secondary_multi_proc_process_writer_thread.do_kill()
-
-
-#=======================================================================================================================
-# WriterDebugZipFiles
-#======================================================================================================================
-class WriterDebugZipFiles(debugger_unittest.AbstractWriterThread):
-
-    TEST_FILE = debugger_unittest._get_debugger_test_file('_debugger_case_zip_files.py')
-
-    def __init__(self, tmpdir):
-        self.tmpdir = tmpdir
-        super(WriterDebugZipFiles, self).__init__()
-        import zipfile
-        zip_file = zipfile.ZipFile(
-            str(tmpdir.join('myzip.zip')), 'w')
-        zip_file.writestr('zipped/__init__.py', '')
-        zip_file.writestr('zipped/zipped_contents.py', 'def call_in_zip():\n    return 1')
-        zip_file.close()
-
-        zip_file = zipfile.ZipFile(
-            str(tmpdir.join('myzip2.egg!')), 'w')
-        zip_file.writestr('zipped2/__init__.py', '')
-        zip_file.writestr('zipped2/zipped_contents2.py', 'def call_in_zip2():\n    return 1')
-        zip_file.close()
-
-    @overrides(debugger_unittest.AbstractWriterThread.get_environ)
-    def get_environ(self):
-        env = os.environ.copy()
-        curr_pythonpath = env.get('PYTHONPATH', '')
-
-        curr_pythonpath = str(self.tmpdir.join('myzip.zip')) + os.pathsep + curr_pythonpath
-        curr_pythonpath = str(self.tmpdir.join('myzip2.egg!')) + os.pathsep + curr_pythonpath
-        env['PYTHONPATH'] = curr_pythonpath
-
-        env["IDE_PROJECT_ROOTS"] = str(self.tmpdir.join('myzip.zip'))
-        return env
-
-    def run(self):
-        self.start_socket()
-        self.write_add_breakpoint(
-            2,
-            'None',
-            filename=os.path.join(str(self.tmpdir.join('myzip.zip')), 'zipped', 'zipped_contents.py')
-        )
-
-        self.write_add_breakpoint(
-            2,
-            'None',
-            filename=os.path.join(str(self.tmpdir.join('myzip2.egg!')), 'zipped2', 'zipped_contents2.py')
-        )
-
-        self.write_make_initial_run()
-        hit = self.wait_for_breakpoint_hit()
-        assert hit.name == 'call_in_zip'
-        self.write_run_thread(hit.thread_id)
-
-        hit = self.wait_for_breakpoint_hit()
-        assert hit.name == 'call_in_zip2'
-        self.write_run_thread(hit.thread_id)
-
-        self.finished_ok = True
-
-
-#=======================================================================================================================
-# WriterCaseBreakpointSuspensionPolicy
-#======================================================================================================================
-class WriterCaseBreakpointSuspensionPolicy(debugger_unittest.AbstractWriterThread):
-
-    TEST_FILE = debugger_unittest._get_debugger_test_file('_debugger_case_suspend_policy.py')
-
-    def run(self):
-        self.start_socket()
-        self.write_add_breakpoint(25, '', filename=self.TEST_FILE, hit_condition='', is_logpoint=False, suspend_policy='ALL')
-        self.write_make_initial_run()
-
-        thread_ids = []
-        for i in range(3):
-            self.log.append('Waiting for thread %s of 3 to stop' % (i + 1,))
-            # One thread is suspended with a breakpoint hit and the other 2 as thread suspended.
-            hit = self.wait_for_breakpoint_hit((REASON_STOP_ON_BREAKPOINT, REASON_THREAD_SUSPEND))
-            thread_ids.append(hit.thread_id)
-
-        for thread_id in thread_ids:
-            self.write_run_thread(thread_id)
-
-        self.finished_ok = True
-
-
-#=======================================================================================================================
-# WriterCaseGetThreadStack
-#======================================================================================================================
-class WriterCaseGetThreadStack(debugger_unittest.AbstractWriterThread):
-
-    TEST_FILE = debugger_unittest._get_debugger_test_file('_debugger_case_get_thread_stack.py')
-
-    def _ignore_stderr_line(self, line):
-        if debugger_unittest.AbstractWriterThread._ignore_stderr_line(self, line):
-            return True
-
-        if IS_JYTHON:
-            for expected in (
-                "RuntimeWarning: Parent module '_pydev_bundle' not found while handling absolute import",
-                "from java.lang import System"):
-                if expected in line:
-                    return True
-
-        return False
-
-    def run(self):
-        self.start_socket()
-        self.write_add_breakpoint(18, None)
-        self.write_make_initial_run()
-
-        thread_created_msgs = [self.wait_for_message(lambda msg:msg.startswith('%s\t' % (CMD_THREAD_CREATE,)))]
-        thread_created_msgs.append(self.wait_for_message(lambda msg:msg.startswith('%s\t' % (CMD_THREAD_CREATE,))))
-        thread_id_to_name = {}
-        for msg in thread_created_msgs:
-            thread_id_to_name[msg.thread['id']] = msg.thread['name']
-        assert len(thread_id_to_name) == 2
-
-        hit = self.wait_for_breakpoint_hit(REASON_STOP_ON_BREAKPOINT)
-        assert hit.thread_id in thread_id_to_name
-
-        for request_thread_id in thread_id_to_name:
-            self.write_get_thread_stack(request_thread_id)
-            msg = self.wait_for_message(lambda msg:msg.startswith('%s\t' % (CMD_GET_THREAD_STACK,)))
-            files = [frame['file'] for frame in  msg.thread.frame]
-            assert msg.thread['id'] == request_thread_id
-            if not files[0].endswith('_debugger_case_get_thread_stack.py'):
-                raise AssertionError('Expected to find _debugger_case_get_thread_stack.py in files[0]. Found: %s' % ('\n'.join(files),))
-
-            if ([filename for filename in files if filename.endswith('pydevd.py')]):
-                raise AssertionError('Did not expect to find pydevd.py. Found: %s' % ('\n'.join(files),))
-            if request_thread_id == hit.thread_id:
-                assert len(msg.thread.frame) == 0  # In main thread (must have no back frames).
-                assert msg.thread.frame['name'] == '<module>'
-            else:
-                assert len(msg.thread.frame) > 1  # Stopped in threading (must have back frames).
-                assert msg.thread.frame[0]['name'] == 'method'
-
-        self.write_run_thread(hit.thread_id)
-
-        self.finished_ok = True
-
-
-#=======================================================================================================================
-# WriterCaseDumpThreadsToStderr
-#======================================================================================================================
-class WriterCaseDumpThreadsToStderr(debugger_unittest.AbstractWriterThread):
-
-    TEST_FILE = debugger_unittest._get_debugger_test_file('_debugger_case_get_thread_stack.py')
-
-    def additional_output_checks(self, stdout, stderr):
-        assert 'Thread Dump' in stderr and 'Thread pydevd.CommandThread  (daemon: True, pydevd thread: True)' in stderr, \
-            'Did not find thread dump in stderr. stderr:\n%s' % (stderr,)
-
-    def run(self):
-        self.start_socket()
-        self.write_add_breakpoint(12, None)
-        self.write_make_initial_run()
-
-        hit = self.wait_for_breakpoint_hit(REASON_STOP_ON_BREAKPOINT)
-
-        self.write_dump_threads()
-        self.write_run_thread(hit.thread_id)
-
-        self.finished_ok = True
-
-
-#=======================================================================================================================
-# WriterCaseStopOnStartRegular
-#=======================================================================================================================
-class WriterCaseStopOnStartRegular(debugger_unittest.AbstractWriterThread):
-
-    TEST_FILE = debugger_unittest._get_debugger_test_file('_debugger_case_simple_calls.py')
-
-    def run(self):
-        self.start_socket()
-        self.write_stop_on_start()
-        self.write_make_initial_run()
-
-        hit = self.wait_for_breakpoint_hit(REASON_STEP_INTO_MY_CODE, file='_debugger_case_simple_calls.py', line=1)
-
-        self.write_run_thread(hit.thread_id)
-
-        self.finished_ok = True
-
-# # ======================================================================================================================
-# # WriterCaseStopOnStartMSwitch
-# # ======================================================================================================================
-# class WriterCaseStopOnStartMSwitch(WriterThreadCaseMSwitch):
-#
-#     def run(self):
-#         self.start_socket()
-#         self.write_stop_on_start()
-#         self.write_make_initial_run()
-#
-#         hit = self.wait_for_breakpoint_hit(REASON_STEP_INTO_MY_CODE, file='_debugger_case_m_switch.py', line=1)
-#
-#         self.write_run_thread(hit.thread_id)
-#
-#         self.finished_ok = True
-#
-#
-# # ======================================================================================================================
-# # WriterCaseStopOnStartEntryPoint
-# # ======================================================================================================================
-# class WriterCaseStopOnStartEntryPoint(WriterThreadCaseModuleWithEntryPoint):
-#
-#     def run(self):
-#         self.start_socket()
-#         self.write_stop_on_start()
-#         self.write_make_initial_run()
-#
-#         hit = self.wait_for_breakpoint_hit(REASON_STEP_INTO_MY_CODE, file='_debugger_case_module_entry_point.py', line=1)
-#
-#         self.write_run_thread(hit.thread_id)
-#
-#         self.finished_ok = True
 
 
 class AbstractWriterThreadCaseDjango(debugger_unittest.AbstractWriterThread):
@@ -2294,37 +2094,183 @@ def test_case_lamdda(case_setup):
 
 @pytest.mark.skipif(IS_JYTHON, reason='Not working properly on Jython (needs investigation).')
 def test_case_suspension_policy(case_setup):
-    case_setup.check_case(WriterCaseBreakpointSuspensionPolicy)
+    with case_setup.test_file('_debugger_case_suspend_policy.py') as writer_thread:
+        writer_thread.write_add_breakpoint(25, '', filename=writer_thread.TEST_FILE, hit_condition='', is_logpoint=False, suspend_policy='ALL')
+        writer_thread.write_make_initial_run()
+
+        thread_ids = []
+        for i in range(3):
+            writer_thread.log.append('Waiting for thread %s of 3 to stop' % (i + 1,))
+            # One thread is suspended with a breakpoint hit and the other 2 as thread suspended.
+            hit = writer_thread.wait_for_breakpoint_hit((REASON_STOP_ON_BREAKPOINT, REASON_THREAD_SUSPEND))
+            thread_ids.append(hit.thread_id)
+
+        for thread_id in thread_ids:
+            writer_thread.write_run_thread(thread_id)
+
+        writer_thread.finished_ok = True
 
 
 def test_case_get_thread_stack(case_setup):
-    case_setup.check_case(WriterCaseGetThreadStack)
+    with case_setup.test_file('_debugger_case_get_thread_stack.py') as writer_thread:
+
+        original_ignore_stderr_line = writer_thread._ignore_stderr_line
+
+        @overrides(writer_thread._ignore_stderr_line)
+        def _ignore_stderr_line(line):
+            if original_ignore_stderr_line(line):
+                return True
+
+            if IS_JYTHON:
+                for expected in (
+                    "RuntimeWarning: Parent module '_pydev_bundle' not found while handling absolute import",
+                    "from java.lang import System"):
+                    if expected in line:
+                        return True
+
+            return False
+
+        writer_thread._ignore_stderr_line = _ignore_stderr_line
+        writer_thread.write_add_breakpoint(18, None)
+        writer_thread.write_make_initial_run()
+
+        thread_created_msgs = [writer_thread.wait_for_message(lambda msg:msg.startswith('%s\t' % (CMD_THREAD_CREATE,)))]
+        thread_created_msgs.append(writer_thread.wait_for_message(lambda msg:msg.startswith('%s\t' % (CMD_THREAD_CREATE,))))
+        thread_id_to_name = {}
+        for msg in thread_created_msgs:
+            thread_id_to_name[msg.thread['id']] = msg.thread['name']
+        assert len(thread_id_to_name) == 2
+
+        hit = writer_thread.wait_for_breakpoint_hit(REASON_STOP_ON_BREAKPOINT)
+        assert hit.thread_id in thread_id_to_name
+
+        for request_thread_id in thread_id_to_name:
+            writer_thread.write_get_thread_stack(request_thread_id)
+            msg = writer_thread.wait_for_message(lambda msg:msg.startswith('%s\t' % (CMD_GET_THREAD_STACK,)))
+            files = [frame['file'] for frame in  msg.thread.frame]
+            assert msg.thread['id'] == request_thread_id
+            if not files[0].endswith('_debugger_case_get_thread_stack.py'):
+                raise AssertionError('Expected to find _debugger_case_get_thread_stack.py in files[0]. Found: %s' % ('\n'.join(files),))
+
+            if ([filename for filename in files if filename.endswith('pydevd.py')]):
+                raise AssertionError('Did not expect to find pydevd.py. Found: %s' % ('\n'.join(files),))
+            if request_thread_id == hit.thread_id:
+                assert len(msg.thread.frame) == 0  # In main thread (must have no back frames).
+                assert msg.thread.frame['name'] == '<module>'
+            else:
+                assert len(msg.thread.frame) > 1  # Stopped in threading (must have back frames).
+                assert msg.thread.frame[0]['name'] == 'method'
+
+        writer_thread.write_run_thread(hit.thread_id)
+
+        writer_thread.finished_ok = True
 
 
 def test_case_dump_threads_to_stderr(case_setup):
-    case_setup.check_case(WriterCaseDumpThreadsToStderr)
+
+    def additional_output_checks(writer_thread, stdout, stderr):
+        assert 'Thread Dump' in stderr and 'Thread pydevd.CommandThread  (daemon: True, pydevd thread: True)' in stderr, \
+            'Did not find thread dump in stderr. stderr:\n%s' % (stderr,)
+
+    with case_setup.test_file(
+        '_debugger_case_get_thread_stack.py', additional_output_checks=additional_output_checks) as writer_thread:
+        writer_thread.write_add_breakpoint(12, None)
+        writer_thread.write_make_initial_run()
+
+        hit = writer_thread.wait_for_breakpoint_hit(REASON_STOP_ON_BREAKPOINT)
+
+        writer_thread.write_dump_threads()
+        writer_thread.write_run_thread(hit.thread_id)
+
+        writer_thread.finished_ok = True
 
 
 def test_stop_on_start_regular(case_setup):
-    case_setup.check_case(WriterCaseStopOnStartRegular)
+    with case_setup.test_file('_debugger_case_simple_calls.py') as writer_thread:
+        writer_thread.write_stop_on_start()
+        writer_thread.write_make_initial_run()
+
+        hit = writer_thread.wait_for_breakpoint_hit(REASON_STEP_INTO_MY_CODE, file='_debugger_case_simple_calls.py', line=1)
+
+        writer_thread.write_run_thread(hit.thread_id)
+
+        writer_thread.finished_ok = True
 
 
-def test_stop_on_start_m_switch(case_setup):
-    case_setup.check_case(WriterCaseStopOnStartMSwitch)
+def test_stop_on_start_m_switch(case_setup_m_switch):
+    with case_setup_m_switch.test_file() as writer_thread:
+        writer_thread.write_stop_on_start()
+        writer_thread.write_make_initial_run()
+
+        hit = writer_thread.wait_for_breakpoint_hit(REASON_STEP_INTO_MY_CODE, file='_debugger_case_m_switch.py', line=1)
+
+        writer_thread.write_run_thread(hit.thread_id)
+
+        writer_thread.finished_ok = True
 
 
-def test_stop_on_start_entry_point(case_setup):
-    case_setup.check_case(WriterCaseStopOnStartEntryPoint)
+def test_stop_on_start_entry_point(case_setup_m_switch_entry_point):
+    with case_setup_m_switch_entry_point.test_file() as writer_thread:
+        writer_thread.write_stop_on_start()
+        writer_thread.write_make_initial_run()
+
+        hit = writer_thread.wait_for_breakpoint_hit(REASON_STEP_INTO_MY_CODE, file='_debugger_case_module_entry_point.py', line=1)
+
+        writer_thread.write_run_thread(hit.thread_id)
+
+        writer_thread.finished_ok = True
 
 
-#=======================================================================================================================
-# Test
-#=======================================================================================================================
-class Test(unittest.TestCase, debugger_unittest.DebuggerRunner):
+@pytest.mark.skipif(IS_JYTHON, reason='Not working properly on Jython (needs investigation).')
+def test_debug_zip_files(case_setup, tmpdir):
 
-    @pytest.mark.skipif(IS_JYTHON, reason='Not working properly on Jython (needs investigation).')
-    def test_debug_zip_files(case_setup):
-        case_setup.check_case(WriterDebugZipFiles(case_setup.tmpdir))
+    def get_environ(writer_thread):
+        env = os.environ.copy()
+        curr_pythonpath = env.get('PYTHONPATH', '')
+
+        curr_pythonpath = str(tmpdir.join('myzip.zip')) + os.pathsep + curr_pythonpath
+        curr_pythonpath = str(tmpdir.join('myzip2.egg!')) + os.pathsep + curr_pythonpath
+        env['PYTHONPATH'] = curr_pythonpath
+
+        env["IDE_PROJECT_ROOTS"] = str(tmpdir.join('myzip.zip'))
+        return env
+
+    import zipfile
+    zip_file = zipfile.ZipFile(
+        str(tmpdir.join('myzip.zip')), 'w')
+    zip_file.writestr('zipped/__init__.py', '')
+    zip_file.writestr('zipped/zipped_contents.py', 'def call_in_zip():\n    return 1')
+    zip_file.close()
+
+    zip_file = zipfile.ZipFile(
+        str(tmpdir.join('myzip2.egg!')), 'w')
+    zip_file.writestr('zipped2/__init__.py', '')
+    zip_file.writestr('zipped2/zipped_contents2.py', 'def call_in_zip2():\n    return 1')
+    zip_file.close()
+
+    with case_setup.test_file('_debugger_case_zip_files.py', get_environ=get_environ) as writer_thread:
+        writer_thread.write_add_breakpoint(
+            2,
+            'None',
+            filename=os.path.join(str(tmpdir.join('myzip.zip')), 'zipped', 'zipped_contents.py')
+        )
+
+        writer_thread.write_add_breakpoint(
+            2,
+            'None',
+            filename=os.path.join(str(tmpdir.join('myzip2.egg!')), 'zipped2', 'zipped_contents2.py')
+        )
+
+        writer_thread.write_make_initial_run()
+        hit = writer_thread.wait_for_breakpoint_hit()
+        assert hit.name == 'call_in_zip'
+        writer_thread.write_run_thread(hit.thread_id)
+
+        hit = writer_thread.wait_for_breakpoint_hit()
+        assert hit.name == 'call_in_zip2'
+        writer_thread.write_run_thread(hit.thread_id)
+
+        writer_thread.finished_ok = True
 
 
 @pytest.mark.skipif(not IS_CPYTHON, reason='CPython only test.')
@@ -2351,42 +2297,5 @@ class TestPythonRemoteDebugger(unittest.TestCase, debugger_unittest.DebuggerRunn
 
     def test_remote_unhandled_exceptions2(self):
         self.check_case(WriterThreadCaseRemoteDebuggerUnhandledExceptions2)
-
-
-def get_java_location():
-    from java.lang import System  # @UnresolvedImport
-    jre_dir = System.getProperty("java.home")
-    for f in [os.path.join(jre_dir, 'bin', 'java.exe'), os.path.join(jre_dir, 'bin', 'java')]:
-        if os.path.exists(f):
-            return f
-    raise RuntimeError('Unable to find java executable')
-
-
-def get_jython_jar():
-    from java.lang import ClassLoader  # @UnresolvedImport
-    cl = ClassLoader.getSystemClassLoader()
-    paths = map(lambda url: url.getFile(), cl.getURLs())
-    for p in paths:
-        if 'jython.jar' in p:
-            return p
-    raise RuntimeError('Unable to find jython.jar')
-
-
-def get_location_from_line(line):
-    loc = line.split('=')[1].strip()
-    if loc.endswith(';'):
-        loc = loc[:-1]
-    if loc.endswith('"'):
-        loc = loc[:-1]
-    if loc.startswith('"'):
-        loc = loc[1:]
-    return loc
-
-
-def split_line(line):
-    if '=' not in line:
-        return None, None
-    var = line.split('=')[0].strip()
-    return var, get_location_from_line(line)
 
 # c:\bin\jython2.7.0\bin\jython.exe -m py.test tests_python
